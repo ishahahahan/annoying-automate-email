@@ -22,7 +22,18 @@ RECEPIENT_EMAIL_ADDRESS = get_secret("RECEPIENT_EMAIL_ADDRESS")
 SMTP_SERVER = 'smtp.gmail.com'
 SMTP_PORT = 587
 
-def send_email(recipient_email, subject, body):
+def format_duration(seconds):
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, remaining_seconds = divmod(remainder, 60)
+
+    if hours:
+        return f"{hours}h {minutes}m {remaining_seconds}s"
+    if minutes:
+        return f"{minutes}m {remaining_seconds}s"
+    return f"{remaining_seconds}s"
+
+def send_email(recipient_email, subject, body, log_fn=None):
     try:
         msg = MIMEMultipart()
         msg['From'] = EMAIL_ADDRESS
@@ -35,12 +46,71 @@ def send_email(recipient_email, subject, body):
             server.login(EMAIL_ADDRESS, EMAIL_ADDRESS_PASSWORD)
             server.sendmail(EMAIL_ADDRESS, recipient_email, msg.as_string())            
 
-        print("Email sent successfully!")
+        if log_fn:
+            log_fn(f"Email sent successfully to {recipient_email} with subject: {subject}")
+        return True
     except Exception as e:
-        print(f"Error sending email: {e}")
+        if log_fn:
+            log_fn(f"Error sending email to {recipient_email} with subject {subject}: {e}")
+        return False
+
+def parse_schedule(email_content):
+    schedule = []
+
+    for scheduled_time, payload in sorted(email_content.items()):
+        if not isinstance(payload, (list, tuple)) or len(payload) != 2:
+            raise ValueError(f"Invalid email content for {scheduled_time}. Expected [subject, body].")
+
+        subject, body = payload
+        time_value = datetime.datetime.strptime(scheduled_time, "%H:%M").time()
+        schedule.append((scheduled_time, time_value, subject, body))
+
+    return schedule
+
+def wait_for_target(target_datetime, subject, scheduled_time, status_box, countdown_box, log_fn):
+    while True:
+        now = datetime.datetime.now()
+
+        if now.strftime("%H:%M") == scheduled_time:
+            countdown_box.metric("Countdown to next mail", "Now", f"Scheduled {scheduled_time}")
+            status_box.info(f"Sending '{subject}' now.")
+            return
+
+        seconds_remaining = int((target_datetime - now).total_seconds())
+
+        if seconds_remaining <= 0:
+            countdown_box.metric("Countdown to next mail", "Now", f"Scheduled {scheduled_time}")
+            status_box.info(f"Sending '{subject}' now.")
+            return
+
+        countdown_box.metric(
+            "Countdown to next mail",
+            format_duration(seconds_remaining),
+            f"Next mail at {scheduled_time}",
+        )
+        status_box.write(f"Connected and working. Waiting to send '{subject}' at {scheduled_time}.")
+        sleep(1)
         
 def main():
+    st.set_page_config(page_title="Automated Email Scheduler", layout="wide")
+    st.title("Automated Email Scheduler")
+    st.caption("Live connection status, sent-mail logs, and countdown updates appear here while the app is running.")
+
     EMAIL_CONTENT = {}
+    log_entries = st.session_state.setdefault("run_logs", [])
+    status_box = st.empty()
+    countdown_box = st.empty()
+    log_box = st.empty()
+
+    def render_logs():
+        recent_logs = log_entries[-40:]
+        log_box.code("\n".join(recent_logs) if recent_logs else "Waiting for events...", language="text")
+
+    def add_log(message):
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entries.append(f"[{timestamp}] {message}")
+        del log_entries[:-80]
+        render_logs()
 
     with open('email_content.json', 'r') as file:
         EMAIL_CONTENT = json.load(file)
@@ -58,26 +128,60 @@ def main():
         )
         st.stop()
 
-    prev_time = None
+    try:
+        schedule = parse_schedule(EMAIL_CONTENT)
+    except ValueError as error:
+        st.error(str(error))
+        st.stop()
 
-    hours = list(EMAIL_CONTENT.keys())
-    
-    for i in range(len(EMAIL_CONTENT)):
-        current_time = datetime.datetime.now().strftime("%H:%M")
-        
-        if current_time == hours[i] and current_time != prev_time:
-            subject, body = EMAIL_CONTENT[hours[i]]
-            send_email(RECEPIENT_EMAIL_ADDRESS, subject, body)
-            print(current_time, hours[i], subject, body)
-            prev_time = current_time
-            
-            if i != len(EMAIL_CONTENT)-1:
-                next_key = hours[i+1]
-                next_time = datetime.datetime.strptime(next_key, "%H:%M")
-                prev_time_dt = datetime.datetime.strptime(prev_time, "%H:%M")
-                sleep_duration = (next_time - prev_time_dt).total_seconds()
-                print(f"Sleeping for {sleep_duration} seconds until next email.")
-                sleep(sleep_duration)
+    if not schedule:
+        st.warning("No scheduled emails found in email_content.json.")
+        st.stop()
+
+    status_box.write("Connected. Secrets loaded and scheduler is running.")
+    st.write(f"Scheduled emails: {len(schedule)}")
+    add_log("Scheduler started successfully.")
+
+    now = datetime.datetime.now()
+    current_date = now.date()
+    start_index = None
+
+    for index, (scheduled_time, _, subject, _) in enumerate(schedule):
+        candidate_datetime = datetime.datetime.combine(current_date, scheduled_time)
+        if scheduled_time >= now.strftime("%H:%M"):
+            start_index = index
+            break
+
+    if start_index is None:
+        start_index = 0
+        current_date = current_date + datetime.timedelta(days=1)
+
+    sent_count = 0
+    render_logs()
+
+    while True:
+        for offset in range(len(schedule)):
+            index = (start_index + offset) % len(schedule)
+            scheduled_time, time_value, subject, body = schedule[index]
+            target_date = current_date if (start_index + offset) < len(schedule) else current_date + datetime.timedelta(days=1)
+            target_datetime = datetime.datetime.combine(target_date, time_value)
+
+            if target_datetime <= datetime.datetime.now() and datetime.datetime.now().strftime("%H:%M") != scheduled_time:
+                continue
+
+            next_mail_label = f"{scheduled_time} - {subject}"
+            st.write(f"Next mail: {next_mail_label}")
+            add_log(f"Next scheduled mail: {next_mail_label}")
+            wait_for_target(target_datetime, subject, scheduled_time, status_box, countdown_box, add_log)
+
+            if send_email(RECEPIENT_EMAIL_ADDRESS, subject, body, add_log):
+                sent_count += 1
+                st.write(f"Sent mails: {sent_count}")
+                status_box.write(f"Sent '{subject}' to {RECEPIENT_EMAIL_ADDRESS}.")
+                add_log(f"Sent '{subject}' to {RECEPIENT_EMAIL_ADDRESS}.")
+
+        current_date = current_date + datetime.timedelta(days=1)
+        start_index = 0
             
 if __name__ == "__main__":
     main()
