@@ -5,14 +5,19 @@ from time import sleep
 import json
 import datetime
 import os
-from dotenv import load_dotenv
+import streamlit as st
 
-load_dotenv()
+def get_secret(key):
+    # safe access: st.secrets may be empty; use .get to avoid exceptions
+    try:
+        val = st.secrets.get(key)
+    except Exception:
+        val = None
+    return val or os.getenv(key)
 
-EMAIL_ADDRESS = os.environ.get('EMAIL_ADDRESS')
-EMAIL_ADDRESS_PASSWORD = os.environ.get('EMAIL_ADDRESS_PASSWORD')
-RECEPIENT_EMAIL_ADDRESS = os.environ.get('RECEPIENT_EMAIL_ADDRESS')
-
+EMAIL_ADDRESS = get_secret("EMAIL_ADDRESS")
+EMAIL_ADDRESS_PASSWORD = get_secret("EMAIL_ADDRESS_PASSWORD")
+RECEPIENT_EMAIL_ADDRESS = get_secret("RECEPIENT_EMAIL_ADDRESS")
 
 SMTP_SERVER = 'smtp.gmail.com'
 SMTP_PORT = 587
@@ -36,12 +41,25 @@ def send_email(recipient_email, subject, body):
         
 def main():
     EMAIL_CONTENT = {}
-    
+
     with open('email_content.json', 'r') as file:
         EMAIL_CONTENT = json.load(file)
-        
+
+    required_secrets = {
+        "EMAIL_ADDRESS": EMAIL_ADDRESS,
+        "EMAIL_ADDRESS_PASSWORD": EMAIL_ADDRESS_PASSWORD,
+        "RECEPIENT_EMAIL_ADDRESS": RECEPIENT_EMAIL_ADDRESS,
+    }
+    missing_secrets = [name for name, value in required_secrets.items() if not value]
+    if missing_secrets:
+        st.error(
+            "Missing required secrets: " + ", ".join(missing_secrets)
+            + ". Add them in Streamlit Cloud Secrets or a local .streamlit/secrets.toml file."
+        )
+        st.stop()
+
     prev_time = None
-    
+
     hours = list(EMAIL_CONTENT.keys())
     
     for i in range(len(EMAIL_CONTENT)):
