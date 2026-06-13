@@ -5,7 +5,10 @@ from time import sleep
 import json
 import datetime
 import os
+from zoneinfo import ZoneInfo
 import streamlit as st
+
+IST = ZoneInfo("Asia/Kolkata")
 
 def get_secret(key):
     # safe access: st.secrets may be empty; use .get to avoid exceptions
@@ -69,7 +72,7 @@ def parse_schedule(email_content):
 
 def wait_for_target(target_datetime, subject, scheduled_time, status_box, countdown_box, log_fn):
     while True:
-        now = datetime.datetime.now()
+        now = datetime.datetime.now(IST)
 
         if now.strftime("%H:%M") == scheduled_time:
             countdown_box.metric("Countdown to next mail", "Now", f"Scheduled {scheduled_time}")
@@ -107,7 +110,7 @@ def main():
         log_box.code("\n".join(recent_logs) if recent_logs else "Waiting for events...", language="text")
 
     def add_log(message):
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S %Z")
         log_entries.append(f"[{timestamp}] {message}")
         del log_entries[:-80]
         render_logs()
@@ -142,12 +145,11 @@ def main():
     st.write(f"Scheduled emails: {len(schedule)}")
     add_log("Scheduler started successfully.")
 
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(IST)
     current_date = now.date()
     start_index = None
 
     for index, (scheduled_time, _, subject, _) in enumerate(schedule):
-        candidate_datetime = datetime.datetime.combine(current_date, scheduled_time)
         if scheduled_time >= now.strftime("%H:%M"):
             start_index = index
             break
@@ -164,9 +166,9 @@ def main():
             index = (start_index + offset) % len(schedule)
             scheduled_time, time_value, subject, body = schedule[index]
             target_date = current_date if (start_index + offset) < len(schedule) else current_date + datetime.timedelta(days=1)
-            target_datetime = datetime.datetime.combine(target_date, time_value)
+            target_datetime = datetime.datetime.combine(target_date, time_value, tzinfo=IST)
 
-            if target_datetime <= datetime.datetime.now() and datetime.datetime.now().strftime("%H:%M") != scheduled_time:
+            if target_datetime <= datetime.datetime.now(IST) and datetime.datetime.now(IST).strftime("%H:%M") != scheduled_time:
                 continue
 
             next_mail_label = f"{scheduled_time} - {subject}"
