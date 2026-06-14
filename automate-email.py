@@ -5,13 +5,11 @@ from time import sleep
 import json
 import datetime
 import os
+import traceback
 from zoneinfo import ZoneInfo
 import streamlit as st
-from dotenv import load_dotenv
 
 IST = ZoneInfo("Asia/Kolkata")
-
-load_dotenv()
 
 try:
     STREAMLIT_SECRETS = dict(st.secrets)
@@ -48,8 +46,11 @@ def load_log_entries():
 
 
 def append_log_entry(message):
-    with open(LOG_FILE, "a", encoding="utf-8") as file:
-        file.write(message + "\n")
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as file:
+            file.write(message + "\n")
+    except Exception:
+        pass
 
 def format_duration(seconds):
     seconds = max(0, int(seconds))
@@ -64,6 +65,9 @@ def format_duration(seconds):
 
 def send_email(recipient_email, subject, body, log_fn=None):
     try:
+        if log_fn:
+            log_fn(f"Attempting to send email to {recipient_email} with subject: {subject}")
+
         msg = MIMEMultipart()
         msg['From'] = EMAIL_ADDRESS
         msg['To'] = recipient_email
@@ -80,7 +84,10 @@ def send_email(recipient_email, subject, body, log_fn=None):
         return True
     except Exception as e:
         if log_fn:
-            log_fn(f"Error sending email to {recipient_email} with subject {subject}: {e}")
+            log_fn(
+                f"Error sending email to {recipient_email} with subject {subject}: {e}\n"
+                f"{traceback.format_exc().strip()}"
+            )
         return False
 
 def parse_schedule(email_content):
@@ -109,6 +116,11 @@ def wait_for_target(target_datetime, subject, scheduled_time, status_box, countd
 
         if seconds_remaining <= 0:
             countdown_box.metric("Countdown to next mail", "Now", f"Scheduled {scheduled_time}")
+            if log_fn:
+                delay_seconds = int((now - target_datetime).total_seconds())
+                log_fn(
+                    f"Scheduled time for '{subject}' has passed by {format_duration(delay_seconds)}; sending immediately."
+                )
             status_box.info(f"Sending '{subject}' now.")
             return
 
@@ -119,6 +131,24 @@ def wait_for_target(target_datetime, subject, scheduled_time, status_box, countd
         )
         status_box.write(f"Connected and working. Waiting to send '{subject}' at {scheduled_time}.")
         sleep(1)
+
+
+def send_email_with_retry(recipient_email, subject, body, status_box, log_fn, retry_delay_seconds=60):
+    attempt = 1
+
+    while True:
+        if send_email(recipient_email, subject, body, log_fn):
+            return
+
+        status_box.error(
+            f"Send failed for '{subject}'. Retrying in {retry_delay_seconds} seconds. Attempt {attempt}."
+        )
+        if log_fn:
+            log_fn(
+                f"Send failed for '{subject}'. Retrying in {retry_delay_seconds} seconds. Attempt {attempt}."
+            )
+        sleep(retry_delay_seconds)
+        attempt += 1
         
 def main():
     st.set_page_config(page_title="Automated Email Scheduler", layout="wide")
@@ -156,8 +186,14 @@ def main():
         status_lines = [f"{key}: {source}" for key, source in secret_status.items()]
         st.info("Secret loading source\n\n" + "\n".join(status_lines))
 
-    with open('email_content.json', 'r') as file:
-        EMAIL_CONTENT = json.load(file)
+    try:
+        with open('email_content.json', 'r') as file:
+            EMAIL_CONTENT = json.load(file)
+        add_log(f"Loaded {len(EMAIL_CONTENT)} scheduled email entries from email_content.json.")
+    except Exception as error:
+        add_log(f"Failed to load email_content.json: {error}\n{traceback.format_exc().strip()}")
+        st.error(f"Failed to load email_content.json: {error}")
+        st.stop()
 
     required_secrets = {
         "EMAIL_ADDRESS": EMAIL_ADDRESS,
@@ -175,10 +211,12 @@ def main():
     try:
         schedule = parse_schedule(EMAIL_CONTENT)
     except ValueError as error:
+        add_log(f"Invalid email schedule: {error}")
         st.error(str(error))
         st.stop()
 
     if not schedule:
+        add_log("No scheduled emails found in email_content.json.")
         st.warning("No scheduled emails found in email_content.json.")
         st.stop()
 
@@ -188,45 +226,34 @@ def main():
     st.write(f"Scheduled emails: {len(schedule)}")
     add_log(f"Scheduler started successfully at {scheduler_started_at.strftime('%Y-%m-%d %H:%M:%S %Z')}.")
 
-    now = datetime.datetime.now(IST)
-    current_date = now.date()
-    start_index = None
-
-    for index, (scheduled_time, _, subject, _) in enumerate(schedule):
-        if scheduled_time >= now.strftime("%H:%M"):
-            start_index = index
-            break
-
-    if start_index is None:
-        start_index = 0
-        current_date = current_date + datetime.timedelta(days=1)
-
+    current_date = datetime.datetime.now(IST).date()
     sent_count = 0
     render_logs()
 
     while True:
-        for offset in range(len(schedule)):
-            index = (start_index + offset) % len(schedule)
-            scheduled_time, time_value, subject, body = schedule[index]
-            target_date = current_date if (start_index + offset) < len(schedule) else current_date + datetime.timedelta(days=1)
+        for scheduled_time, time_value, subject, body in schedule:
+            target_date = current_date
             target_datetime = datetime.datetime.combine(target_date, time_value, tzinfo=IST)
-
-            if target_datetime <= datetime.datetime.now(IST) and datetime.datetime.now(IST).strftime("%H:%M") != scheduled_time:
-                continue
+            now = datetime.datetime.now(IST)
 
             next_mail_label = f"{scheduled_time} - {subject}"
             st.write(f"Next mail: {next_mail_label}")
             add_log(f"Next scheduled mail: {next_mail_label}")
-            wait_for_target(target_datetime, subject, scheduled_time, status_box, countdown_box, add_log)
+            if target_datetime <= now:
+                add_log(
+                    f"Scheduled time for '{subject}' is already past; sending now to avoid skipping this email."
+                )
+            else:
+                wait_for_target(target_datetime, subject, scheduled_time, status_box, countdown_box, add_log)
 
-            if send_email(RECEPIENT_EMAIL_ADDRESS, subject, body, add_log):
-                sent_count += 1
-                st.write(f"Sent mails: {sent_count}")
-                status_box.write(f"Sent '{subject}' to {RECEPIENT_EMAIL_ADDRESS}.")
-                add_log(f"Sent '{subject}' to {RECEPIENT_EMAIL_ADDRESS}.")
+            send_email_with_retry(RECEPIENT_EMAIL_ADDRESS, subject, body, status_box, add_log)
+            sent_count += 1
+            st.write(f"Sent mails: {sent_count}")
+            status_box.write(f"Sent '{subject}' to {RECEPIENT_EMAIL_ADDRESS}.")
+            add_log(f"Sent '{subject}' to {RECEPIENT_EMAIL_ADDRESS}.")
 
+        add_log("Completed one full schedule pass; continuing with the next day.")
         current_date = current_date + datetime.timedelta(days=1)
-        start_index = 0
             
 if __name__ == "__main__":
     main()
