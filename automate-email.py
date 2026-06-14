@@ -36,6 +36,20 @@ RECEPIENT_EMAIL_ADDRESS, RECEPIENT_EMAIL_ADDRESS_SOURCE = get_secret("RECEPIENT_
 
 SMTP_SERVER = 'smtp.gmail.com'
 SMTP_PORT = 587
+LOG_FILE = "email_run.log"
+
+
+def load_log_entries():
+    if not os.path.exists(LOG_FILE):
+        return []
+
+    with open(LOG_FILE, "r", encoding="utf-8") as file:
+        return [line.rstrip("\n") for line in file if line.strip()]
+
+
+def append_log_entry(message):
+    with open(LOG_FILE, "a", encoding="utf-8") as file:
+        file.write(message + "\n")
 
 def format_duration(seconds):
     seconds = max(0, int(seconds))
@@ -111,8 +125,12 @@ def main():
     st.title("Automated Email Scheduler")
     st.caption("Live connection status, sent-mail logs, and countdown updates appear here while the app is running.")
 
+    if "scheduler_started_at" not in st.session_state:
+        st.session_state["scheduler_started_at"] = datetime.datetime.now(IST)
+    scheduler_started_at = st.session_state["scheduler_started_at"]
+
     EMAIL_CONTENT = {}
-    log_entries = st.session_state.setdefault("run_logs", [])
+    log_entries = load_log_entries()
     status_box = st.empty()
     countdown_box = st.empty()
     log_box = st.empty()
@@ -123,7 +141,9 @@ def main():
 
     def add_log(message):
         timestamp = datetime.datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S %Z")
-        log_entries.append(f"[{timestamp}] {message}")
+        entry = f"[{timestamp}] {message}"
+        log_entries.append(entry)
+        append_log_entry(entry)
         del log_entries[:-80]
         render_logs()
 
@@ -163,9 +183,10 @@ def main():
         st.stop()
 
     render_secret_status()
+    st.success(f"Scheduler started at: {scheduler_started_at.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     status_box.write("Connected. Secrets loaded and scheduler is running.")
     st.write(f"Scheduled emails: {len(schedule)}")
-    add_log("Scheduler started successfully.")
+    add_log(f"Scheduler started successfully at {scheduler_started_at.strftime('%Y-%m-%d %H:%M:%S %Z')}.")
 
     now = datetime.datetime.now(IST)
     current_date = now.date()
