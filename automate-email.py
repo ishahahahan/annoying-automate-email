@@ -7,20 +7,32 @@ import datetime
 import os
 from zoneinfo import ZoneInfo
 import streamlit as st
+from dotenv import load_dotenv
 
 IST = ZoneInfo("Asia/Kolkata")
 
-def get_secret(key):
-    # safe access: st.secrets may be empty; use .get to avoid exceptions
-    try:
-        val = st.secrets.get(key)
-    except Exception:
-        val = None
-    return val or os.getenv(key)
+load_dotenv()
 
-EMAIL_ADDRESS = get_secret("EMAIL_ADDRESS")
-EMAIL_ADDRESS_PASSWORD = get_secret("EMAIL_ADDRESS_PASSWORD")
-RECEPIENT_EMAIL_ADDRESS = get_secret("RECEPIENT_EMAIL_ADDRESS")
+try:
+    STREAMLIT_SECRETS = dict(st.secrets)
+except Exception:
+    STREAMLIT_SECRETS = {}
+
+def get_secret(key):
+    # Prefer Streamlit secrets, then environment variables (.env or OS env)
+    value = STREAMLIT_SECRETS.get(key)
+    if value:
+        return value, "Streamlit secrets"
+
+    value = os.getenv(key)
+    if value:
+        return value, ".env / environment"
+
+    return None, "missing"
+
+EMAIL_ADDRESS, EMAIL_ADDRESS_SOURCE = get_secret("EMAIL_ADDRESS")
+EMAIL_ADDRESS_PASSWORD, EMAIL_ADDRESS_PASSWORD_SOURCE = get_secret("EMAIL_ADDRESS_PASSWORD")
+RECEPIENT_EMAIL_ADDRESS, RECEPIENT_EMAIL_ADDRESS_SOURCE = get_secret("RECEPIENT_EMAIL_ADDRESS")
 
 SMTP_SERVER = 'smtp.gmail.com'
 SMTP_PORT = 587
@@ -115,6 +127,15 @@ def main():
         del log_entries[:-80]
         render_logs()
 
+    def render_secret_status():
+        secret_status = {
+            "EMAIL_ADDRESS": EMAIL_ADDRESS_SOURCE,
+            "EMAIL_ADDRESS_PASSWORD": EMAIL_ADDRESS_PASSWORD_SOURCE,
+            "RECEPIENT_EMAIL_ADDRESS": RECEPIENT_EMAIL_ADDRESS_SOURCE,
+        }
+        status_lines = [f"{key}: {source}" for key, source in secret_status.items()]
+        st.info("Secret loading source\n\n" + "\n".join(status_lines))
+
     with open('email_content.json', 'r') as file:
         EMAIL_CONTENT = json.load(file)
 
@@ -141,6 +162,7 @@ def main():
         st.warning("No scheduled emails found in email_content.json.")
         st.stop()
 
+    render_secret_status()
     status_box.write("Connected. Secrets loaded and scheduler is running.")
     st.write(f"Scheduled emails: {len(schedule)}")
     add_log("Scheduler started successfully.")
